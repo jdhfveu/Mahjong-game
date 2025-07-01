@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Маджонг</title>
+  <link rel="stylesheet" href="styles.css">
+  <style>
+#game-over-screen {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  display: none;              /* скрываем по-умолчанию */
+  justify-content: center;
+  align-items: center;
+  background: rgba(0,0,0,0.7);
+  z-index: 1000;
+}
+#game-over-screen .content {
+  background: #fff;
+  padding: 2em;
+  border-radius: 8px;
+  text-align: center;
+}
+#game-over-screen button {
+  margin-top: 1em;
+  padding: .5em 1em;
+  font-size: 1rem;
+}
+
+    body { font-family: Arial, sans-serif; text-align: center; background: #f0f0f0; margin:0; padding:20px }
+    h1 { color: #333 }
+    #score { font-size:24px; margin:10px 0; color:#333 }
+    #game-board {
+      width:800px; height:600px; margin:0 auto;
+      background:#2c3e50; border-radius:10px;
+      position:relative; overflow:hidden
+    }
+    .tile {
+      width:50px; height:70px; position:absolute;
+      background-size:cover; background-repeat:no-repeat;
+      border-radius:5px;
+      box-shadow:2px 2px 5px rgba(0,0,0,0.3);
+      transition:transform .2s,box-shadow .2s,border .2s;
+    }
+    .tile.blocked { filter:brightness(0.6); cursor:not-allowed }
+    .tile.free { cursor:pointer }
+    .tile.free:hover {
+      transform:scale(1.1); box-shadow:0 0 10px rgba(255,255,0.7); z-index:100
+    }
+    .tile.selected {
+      border:3px solid gold; transform:scale(1.1);
+      box-shadow:0 0 15px gold; z-index:101
+    }
+    .tile.hint {
+      border:3px dashed cyan !important;
+      transform:scale(1.1);
+      box-shadow:0 0 15px cyan !important;
+      z-index:101;
+    }
+    .tile.matched {
+      opacity:0; pointer-events:none; transition:opacity .5s
+    }
+    #restart, #hint {
+      display:inline-block; margin:10px 5px;
+      padding:8px 20px; background:#4CAF50; color:#fff;
+      border:none; border-radius:4px; cursor:pointer;
+      font-size:16px;
+    }
+    #restart:hover, #hint:hover { background:#45a049 }
+  </style>
+</head>
+   <body><h1>Маджонг</h1>
+   <div id="game-over" class="overlay hidden">
+  <p id="final-message"></p>
+  <button id="play-again">Играть заново</button>
+</div>
+  <div id="score">Счёт: <span>0</span></div>
+  <div id="timer">Время: <span>00:00</span></div>
+  <div id="game-board"></div>
+  <button id="restart">Перезапустить</button>
+  <button id="hint">Подсказка</button>
+<script src="timer.js"></script>
+<script src="gameOver.js"></script>
+<script src="main.js"></script>
+
+  <script>
+  // --- Конфиг и константы ---
+  const config = {
+    tileTypes: ['bamboo','circle','pinyin'],
+    tileNumbers: [1,2,3,4,5,6,7,8,9],
+    specialTiles: ['chrysanthemum','fall','lotus','orchid','peony','spring','summer','winter'],
+    layers: 5, rows: 8, cols: 12
+  };
+
+  const BOARD_W = 800, BOARD_H = 600;
+  const MARGIN_X = 20, MARGIN_Y = 20;
+  const TILE_W = 50, TILE_H = 70;
+  const X_STEP = 55, Y_STEP = 75;
+
+  // генерим смещения по Y для каждого слоя
+  const yOffsets = [0];
+  for (let i = 1; i < config.layers; i++) {
+    const delta = (Math.random() < 0.5 ? -1 : 1) * (TILE_H / 2);
+    yOffsets[i] = yOffsets[i - 1] + delta;
+  }
+  // генерим X-смещения по слоям, справа-налево
+const xOffsets = [0];
+for (let i = 1; i < config.layers; i++) {
+  xOffsets[i] = xOffsets[i - 1] - 3;  // каждый слой влево на 3px
+}
+
+
+  let tiles = [], selected = null, score = 0;
+
+  // --- Утилиты ---
+  function shuffle(arr) {
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
+  }
+
+  // создаёт ровно по 2 плитки каждого типа
+  function createTiles() {
+    const arr = [];
+    config.tileTypes.forEach(type =>
+      config.tileNumbers.forEach(num =>
+        Array.from({length:2}).forEach((_,i) =>
+          arr.push({type, num, id:`${type}${num}_${i}`, image:`${type}${num}.png`, matched:false})
+        )
+      )
+    );
+    config.specialTiles.forEach(name =>
+      Array.from({length:2}).forEach((_,i) =>
+        arr.push({type:'special', name, id:`${name}_${i}`, image:`${name}.png`, matched:false})
+      )
+    );
+    return arr;
+  }
+
+  const basePool = createTiles();  // неизменяемый набор плиток
+
+  function inBounds(col, row, layer) {
+    const left = col * X_STEP + MARGIN_X + xOffsets[layer];
+    const top  = row * Y_STEP + MARGIN_Y + yOffsets[layer];
+    return left >= 0 && left + TILE_W <= BOARD_W &&
+           top  >= 0 && top  + TILE_H <= BOARD_H;
+  }
+
+  // --- Генерация раскладки ---
+  function generateRandomLayout() {
+    const pool = basePool.slice();
+    let posList = [], tries = 0;
+    do {
+      const L = 1 + Math.floor(Math.random() * config.layers);
+      const layersPos = [[]];
+      for (let r = 0; r < config.rows; r++) {
+        for (let c = 0; c < config.cols; c++) {
+          if (Math.random() < 0.8) layersPos[0].push({layer:0,row:r,col:c});
+        }
+      }
+      for (let l = 1; l < L; l++) {
+        layersPos[l] = [];
+        layersPos[l-1].forEach(p => {
+          if (Math.random() < 0.3) layersPos[l].push({layer:l,row:p.row,col:p.col});
+        });
+        if (!layersPos[l].length) {
+          for (let i = 0; i < 2; i++) {
+            const pick = layersPos[l-1][Math.floor(Math.random()*layersPos[l-1].length)];
+            layersPos[l].push({layer:l,row:pick.row,col:pick.col});
+          }
+        }
+      }
+      posList = layersPos.flat().filter(p => inBounds(p.col,p.row,p.layer));
+      tries++;
+    } while (posList.length < 2 && tries < 10);
+
+// В generateRandomLayout, после создания tiles:
+if (posList.length > pool.length) {
+  shuffle(posList);
+  posList = posList.slice(0, pool.length + 1); // +1 к длине пула, чтобы осталась 1 пустая ячейка
+}
+
+shuffle(posList);
+let reserveSlot = posList.pop(); // сохраняем последнюю позицию как пустую
+
+tiles = posList.map((p, i) => ({
+  ...pool[i],
+  layer: p.layer,
+  row: p.row,
+  col: p.col,
+  matched: false
+}));
+
+// Проверка количества каждой пары (на время отладки)
+const counts = {};
+tiles.forEach(t => {
+  const key = t.type==='special'? `S_${t.name}` : `${t.type}_${t.num}`;
+  counts[key] = (counts[key]||0) + 1;
+});
+console.log(counts);  // для каждой ключ-группы должно быть ровно 2
+
+// можно позже использовать reserveSlot при необходимости
+
+  }
+
+  // --- Проверка свободы и матчинга ---
+  function isTileFree(tile) {
+    if (tile.matched) return false;
+    const x1 = tile.col * X_STEP + MARGIN_X;
+    const y1 = tile.row * Y_STEP + MARGIN_Y + yOffsets[tile.layer];
+    const x2 = x1 + TILE_W, y2 = y1 + TILE_H;
+
+    // слой над проверка
+    for (let o of tiles) {
+      if (o.matched || o.layer <= tile.layer) continue;
+      const ox1 = o.col * X_STEP + MARGIN_X;
+      const oy1 = o.row * Y_STEP + MARGIN_Y + yOffsets[o.layer];
+      const ox2 = ox1 + TILE_W, oy2 = oy1 + TILE_H;
+      if (x1 < ox2 && x2 > ox1 && y1 < oy2 && y2 > oy1) return false;
+    }
+
+    // проверка по бокам на том же слое
+    let leftBlocked = false, rightBlocked = false;
+    tiles.forEach(o => {
+      if (o.matched || o.layer !== tile.layer || o.row !== tile.row) return;
+      if (o.col === tile.col - 1) leftBlocked = true;
+      if (o.col === tile.col + 1) rightBlocked = true;
+    });
+    return (!leftBlocked || !rightBlocked);
+  }
+
+  function tilesMatch(a, b) {
+    if (a.type === 'special' && b.type === 'special')
+      return a.name === b.name;
+    return a.type === b.type && a.num === b.num;
+  }
+
+  function freeTiles() {
+    return tiles.filter(t => !t.matched && isTileFree(t));
+  }
+
+  // проверяем, остались ли доступные пары
+  function hasAvailableMoves() {
+    const free = freeTiles();
+    const groups = {};
+    for (let t of free) {
+      const key = t.type==='special'? `S_${t.name}` : `${t.type}_${t.num}`;
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(t);
+      if (groups[key].length === 2) return true;
+    }
+    return false;
+  }
+
+  // автоматическое перемешивание оставшихся плиток
+function shuffleUnmatched() {
+  const unmatched = tiles.filter(t => !t.matched);
+  // массив их текущих координат
+  const coords = unmatched.map(({ row, col, layer }) => ({ row, col, layer }));
+
+  let found = false, attempts = 0;
+  while (!found && attempts < 20) {
+    shuffle(coords);
+    // присваиваем каждой плитке новый набор координат
+    unmatched.forEach((tile, i) => {
+      tile.row   = coords[i].row;
+      tile.col   = coords[i].col;
+      tile.layer = coords[i].layer;
+    });
+
+    // убираем вертикальные «стэки» одинаковых плиток
+    fixVerticalStacks();
+
+    // если теперь есть хотя бы одна свободная пара — выходим
+    if (hasAvailableMoves()) {
+      found = true;
+      break;
+    }
+    attempts++;
+  }
+
+  if (!found) {
+    alert("Не удалось найти доступные пары даже после перемешивания.");
+  }
+
+  renderTiles();
+}
+
+
+  // подсказка для игрока (опционально)
+  function showHint() {
+    const free = freeTiles();
+    const groups = {};
+    let a, b;
+    for (let t of free) {
+      const key = t.type==='special'? `S_${t.name}` : `${t.type}_${t.num}`;
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(t);
+      if (groups[key].length === 2) {
+        [a, b] = groups[key];
+        break;
+      }
+    }
+    if (a && b) {
+      const elA = document.querySelector(`.tile[data-id="${a.id}"]`);
+      const elB = document.querySelector(`.tile[data-id="${b.id}"]`);
+      elA?.classList.add('hint');
+      elB?.classList.add('hint');
+      setTimeout(() => {
+        elA?.classList.remove('hint');
+        elB?.classList.remove('hint');
+      }, 1000);
+    }
+  }
+  
+  function fixVerticalStacks() {
+  // Группируем по «ключу» (тип+номер или специальное имя)
+  const groups = {};
+  tiles.filter(t => !t.matched)
+       .forEach(t => {
+         const key = t.type === 'special'
+           ? `S_${t.name}` 
+           : `${t.type}_${t.num}`;
+         (groups[key] = groups[key] || []).push(t);
+       });
+
+  // Для каждой группы одинаковых плиток
+  Object.values(groups).forEach(arr => {
+    for (let i = 0; i < arr.length; i++) {
+      for (let j = i + 1; j < arr.length; j++) {
+        const a = arr[i], b = arr[j];
+        // если они попали в точности на один и тот же (row,col)
+        if (a.row === b.row && a.col === b.col && a.layer !== b.layer) {
+          // переводим обе на минимальный слой из двух
+          const targetLayer = Math.min(a.layer, b.layer);
+          a.layer = b.layer = targetLayer;
+        }
+      }
+    }
+  });
+}
+
+function tryUseReserveIfBlocked() {
+  const unmatched = tiles.filter(t => !t.matched);
+  if (unmatched.length === 2 && !isTileFree(unmatched[0]) && !isTileFree(unmatched[1])) {
+    let upper = unmatched[0].layer > unmatched[1].layer ? unmatched[0] : unmatched[1];
+    upper.row = reserveSlot.row;
+    upper.col = reserveSlot.col;
+    upper.layer = reserveSlot.layer;
+    renderTiles();
+  }
+}
+
+  // --- Рендер и обработка кликов ---
+  function renderTiles() {
+  const board = document.getElementById('game-board');
+  board.innerHTML = '';
+  tiles
+    .sort((a,b) => a.layer - b.layer)
+    .forEach(t => {
+      if (t.matched) return;
+      const el = document.createElement('div');
+      el.dataset.id = t.id;
+
+      const free = isTileFree(t);
+      el.className = 'tile ' + (free ? 'free' : 'blocked');
+      if (selected?.id === t.id) el.classList.add('selected');
+
+      // ЛЕВО = базовая позиция + X-ШАГ + xOffsets
+      el.style.left   = `${t.col * X_STEP + MARGIN_X + xOffsets[t.layer]}px`;
+      el.style.top    = `${t.row * Y_STEP + MARGIN_Y + yOffsets[t.layer]}px`;
+      el.style.zIndex = t.layer * 10 + (free ? 50 : 5);
+      el.style.backgroundImage = `url(assets/${t.image})`;
+
+      if (free) el.onclick = () => handleClick(t);
+      board.appendChild(el);
+    });
+}
+
+function handleClick(tile) {
+  if (!isTileFree(tile)) return;
+  if (!selected) {
+    selected = tile;
+    renderTiles();
+    return;
+  }
+  if (selected.id === tile.id) return;
+
+  if (tilesMatch(selected, tile)) {
+    // 1) Сняли пару
+    selected.matched = tile.matched = true;
+    score += 10;
+    document.querySelector('#score span').textContent = score;
+    selected = null;
+    renderTiles();
+
+    // 2) Считаем, сколько осталось незамеченных
+    const remaining = tiles.filter(t => !t.matched);
+
+    // 3) Если осталось ровно две и это одна пара — гейм овер
+    if (remaining.length === 2) {
+      // даём браузеру отрисовать пустое поле
+      setTimeout(() => {
+        stopTimer();  // останавливаем таймер
+        showGameOver(score, getElapsedSeconds());
+      }, 300);
+      return;  // выходим, чтобы не сработало авто-перемешивание
+    }
+
+    // 4) Если ходов нет — авто-перемешиваем
+    if (!hasAvailableMoves()) {
+      tryUseReserveIfBlocked();
+      if (!hasAvailableMoves()) {
+        console.log("Авто-перемешивание: ходов нет");
+        shuffleUnmatched();
+      }
+    }
+
+  } else {
+    // не совпало — сброс выбора
+    renderTiles();
+    setTimeout(() => {
+      selected = null;
+      renderTiles();
+    }, 400);
+  }
+}
+
+
+ function initGame() {
+  startTimer();  // запускаем таймер
+  score = 0;
+  selected = null;
+  document.querySelector('#score span').textContent = score;
+  generateRandomLayout();
+  renderTiles();
+}
+
+
+  window.onload = () => {
+    initGame();
+    document.getElementById('restart').onclick = initGame;
+    document.getElementById('hint').onclick    = showHint;
+  };
+  </script>
+</body>
+</html>
+
